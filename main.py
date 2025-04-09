@@ -1,62 +1,83 @@
+import os
 import time
 import requests
 from datetime import datetime
 
 # === CONFIGURAÇÕES ===
-HELIUS_API_KEY = "SUA_API_KEY_AQUI"
-TELEGRAM_TOKEN = "SEU_TOKEN_TELEGRAM_AQUI"
-TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
-VALOR_MINIMO_USD = 10
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CARTEIRA = "DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj"
+VALOR_MINIMO_USD = 10
 INTERVALO_MINUTOS = 15
 
 def enviar_telegram(mensagem):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": mensagem
+    }
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        if not r.ok:
+            print("❌ Erro ao enviar Telegram:", r.text)
     except Exception as e:
-        print("Erro ao enviar mensagem:", e)
+        print("❌ Exceção ao enviar Telegram:", e)
 
 def interpretar_transacao(tx):
-    token_transfers = tx.get("tokenTransfers", [])
-    if not token_transfers:
+    try:
+        token_transfer = tx.get("tokenTransfers", [])
+        native_transfer = tx.get("nativeTransfers", [])
+
+        if not token_transfer and not native_transfer:
+            return None
+
+        if token_transfer:
+            token = token_transfer[0]
+            token_symbol = token.get("tokenSymbol", "TOKEN")
+            token_amount = float(token.get("amount", 0))
+        else:
+            token_symbol = "SOL"
+            token_amount = float(native_transfer[0].get("amount", 0)) / 1e9
+
+        valor_usd = float(tx.get("fee", 0)) / 1e9  # fallback
+        timestamp = datetime.fromtimestamp(tx.get("timestamp", 0)).strftime('%d/%m %H:%M')
+        direcao = "Compra" if token_amount > 0 else "Venda"
+
+        valor_real = abs(token_amount)
+        if valor_real < VALOR_MINIMO_USD:
+            return None
+
+        return f"💰{direcao} - {token_symbol}\nValor: ~${valor_real:.2f}\nHorário: {timestamp}"
+    except Exception as e:
+        print("❌ Erro interpretando transação:", e)
         return None
-
-    token = token_transfers[0]
-    amount = float(token.get("tokenAmount", {}).get("usdValue", 0))
-    if amount < VALOR_MINIMO_USD:
-        return None
-
-    direcao = "Compra" if amount > 0 else "Venda"
-    symbol = token.get("tokenSymbol", "TOKEN")
-    qtd = float(token.get("tokenAmount", {}).get("amount", 0))
-    hora = datetime.fromtimestamp(tx.get("timestamp", 0)).strftime("%d/%m %H:%M")
-
-    return f"💰{direcao}: {symbol}\nQuantidade: {qtd:.2f}\nValor: ${abs(amount):.2f}\nHorário: {hora}"
 
 def monitorar():
-    print("🔎 Checando transações...")
+    print("🔎 Checando transações...\n")
     url = f"https://api.helius.xyz/v0/addresses/{CARTEIRA}/transactions?api-key={HELIUS_API_KEY}&limit=100"
-    r = requests.get(url)
-    if not r.ok:
-        print("Erro ao buscar transações:", r.text)
-        return
+    try:
+        r = requests.get(url)
+        if not r.ok:
+            print("Erro ao buscar transações:", r.text)
+            return
 
-    data = r.json()
-    mensagens = []
-    for tx in data[:5]:
-        msg = interpretar_transacao(tx)
-        if msg:
-            mensagens.append(msg)
+        data = r.json()
+        mensagens = []
+        for tx in data[:5]:  # analisando 5 mais recentes
+            msg = interpretar_transacao(tx)
+            if msg:
+                mensagens.append(msg)
 
-    if mensagens:
-        for m in mensagens:
-            enviar_telegram(m)
-    else:
-        print("✅ Nenhuma transação relevante encontrada.")
+        if mensagens:
+            enviar_telegram("\n\n".join(mensagens))
+        else:
+            print("✅ Nenhuma transação relevante encontrada.\n")
 
-# === LOOP ===
+    except Exception as e:
+        print("❌ Erro geral:", e)
+
+# === LOOP PRINCIPAL ===
 while True:
     monitorar()
     time.sleep(INTERVALO_MINUTOS * 60)
